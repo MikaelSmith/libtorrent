@@ -449,6 +449,9 @@ namespace libtorrent
 		// that couldn't be
 		int try_evict_blocks(int num, cached_piece_entry* ignore = 0);
 
+		// try to evict a single volatile piece, if there is one.
+		void try_evict_one_volatile();
+
 		// if there are any dirty blocks
 		void clear(tailqueue<disk_io_job>& jobs);
 

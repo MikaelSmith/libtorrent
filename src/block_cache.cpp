@@ -554,6 +554,80 @@ void block_cache::update_cache_state(cached_piece_entry* p)
 #endif
 }
 
+void block_cache::try_evict_one_volatile()
+{
+	INVARIANT_CHECK;
+
+	DLOG(stderr, "[%p] try_evict_one_volatile\n", static_cast<void*>(this));
+
+	linked_list<cached_piece_entry>* piece_list = &m_lru[cached_piece_entry::volatile_read_lru];
+
+	for (list_iterator<cached_piece_entry> i = piece_list->iterate(); i.get();)
+	{
+		cached_piece_entry* pe = reinterpret_cast<cached_piece_entry*>(i.get());
+		TORRENT_PIECE_ASSERT(pe->in_use, pe);
+		i.next();
+
+		if (pe->ok_to_evict())
+		{
+#ifdef TORRENT_DEBUG
+			for (int j = 0; j < pe->blocks_in_piece; ++j)
+				TORRENT_PIECE_ASSERT(pe->blocks[j].buf == 0, pe);
+#endif
+			TORRENT_PIECE_ASSERT(pe->refcount == 0, pe);
+			move_to_ghost(pe);
+			continue;
+		}
+
+		TORRENT_PIECE_ASSERT(pe->num_dirty == 0, pe);
+
+		// someone else is using this piece
+		if (pe->refcount > 0) continue;
+
+		// some blocks are pinned in this piece, skip it
+		if (pe->pinned > 0) continue;
+
+		char** to_delete = TORRENT_ALLOCA(char*, pe->blocks_in_piece);
+		int num_to_delete = 0;
+
+		// go through the blocks and evict the ones that are not dirty and not
+		// referenced
+		for (int j = 0; j < pe->blocks_in_piece; ++j)
+		{
+			cached_block_entry& b = pe->blocks[j];
+
+			TORRENT_PIECE_ASSERT(b.dirty == false, pe);
+			TORRENT_PIECE_ASSERT(b.pending == false, pe);
+
+			if (b.buf == 0 || b.refcount > 0 || b.dirty || b.pending) continue;
+
+			to_delete[num_to_delete++] = b.buf;
+			b.buf = NULL;
+			TORRENT_PIECE_ASSERT(pe->num_blocks > 0, pe);
+			--pe->num_blocks;
+			TORRENT_PIECE_ASSERT(m_read_cache_size > 0, pe);
+			--m_read_cache_size;
+		}
+
+		if (pe->ok_to_evict())
+		{
+#ifdef TORRENT_DEBUG
+			for (int j = 0; j < pe->blocks_in_piece; ++j)
+				TORRENT_PIECE_ASSERT(pe->blocks[j].buf == 0, pe);
+#endif
+			move_to_ghost(pe);
+		}
+
+		if (num_to_delete == 0) return;
+
+		DLOG(stderr, "[%p]    removed %d blocks\n", static_cast<void*>(this)
+			, num_to_delete);
+
+		free_multiple_buffers(to_delete, num_to_delete);
+		return;
+	}
+}
+
 cached_piece_entry* block_cache::allocate_piece(disk_io_job const* j, int cache_state)
 {
 #ifdef TORRENT_EXPENSIVE_INVARIANT_CHECKS
@@ -570,8 +644,8 @@ cached_piece_entry* block_cache::allocate_piece(disk_io_job const* j, int cache_
 	cached_piece_entry* p = find_piece(j);
 	if (p == 0)
 	{
-		int piece_size = j->storage->files()->piece_size(j->piece);
-		int blocks_in_piece = (piece_size + block_size() - 1) / block_size();
+		int const piece_size = j->storage->files()->piece_size(j->piece);
+		int const blocks_in_piece = (piece_size + block_size() - 1) / block_size();
 
 		cached_piece_entry pe;
 		pe.piece = j->piece;
@@ -1505,8 +1579,8 @@ void block_cache::free_piece(cached_piece_entry* pe)
 
 int block_cache::drain_piece_bufs(cached_piece_entry& p, std::vector<char*>& buf)
 {
-	int piece_size = p.storage->files()->piece_size(p.piece);
-	int blocks_in_piece = (piece_size + block_size() - 1) / block_size();
+	int const piece_size = p.storage->files()->piece_size(p.piece);
+	int const blocks_in_piece = (piece_size + block_size() - 1) / block_size();
 	int ret = 0;
 
 	TORRENT_PIECE_ASSERT(p.in_use, &p);
@@ -1725,8 +1799,9 @@ void block_cache::check_invariant() const
 // -1: block not in cache
 // -2: out of memory
 
-int block_cache::copy_from_piece(cached_piece_entry* pe, disk_io_job* j
-	, bool expect_no_fail)
+int block_cache::copy_from_piece(cached_piece_entry* const pe
+	, disk_io_job* const j
+	, bool const expect_no_fail)
 {
 	INVARIANT_CHECK;
 	TORRENT_UNUSED(expect_no_fail);
@@ -1739,13 +1814,13 @@ int block_cache::copy_from_piece(cached_piece_entry* pe, disk_io_job* j
 	int block_offset = j->d.io.offset & (block_size()-1);
 	int buffer_offset = 0;
 	int size = j->d.io.buffer_size;
-	int blocks_to_read = block_offset > 0 && (size > block_size() - block_offset) ? 2 : 1;
+	int const blocks_to_read = block_offset > 0 && (size > block_size() - block_offset) ? 2 : 1;
 	TORRENT_PIECE_ASSERT(size <= block_size(), pe);
-	const int start_block = block;
+	int const start_block = block;
 
 #if TORRENT_USE_ASSERTS
-	int piece_size = j->storage->files()->piece_size(j->piece);
-	int blocks_in_piece = (piece_size + block_size() - 1) / block_size();
+	int const piece_size = j->storage->files()->piece_size(j->piece);
+	int const blocks_in_piece = (piece_size + block_size() - 1) / block_size();
 	TORRENT_PIECE_ASSERT(start_block < blocks_in_piece, pe);
 #endif
 
