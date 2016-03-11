@@ -366,6 +366,8 @@ block_cache::block_cache(int block_size, io_service& ios
 	: disk_buffer_pool(block_size, ios, trigger_trim)
 	, m_last_cache_op(cache_miss)
 	, m_ghost_size(8)
+	, m_max_volatile_blocks(100)
+	, m_volatile_size(0)
 	, m_read_cache_size(0)
 	, m_write_cache_size(0)
 	, m_send_buffer_blocks(0)
@@ -560,6 +562,8 @@ void block_cache::try_evict_one_volatile()
 
 	DLOG(stderr, "[%p] try_evict_one_volatile\n", static_cast<void*>(this));
 
+	if (m_volatile_size < m_max_volatile_blocks) return;
+
 	linked_list<cached_piece_entry>* piece_list = &m_lru[cached_piece_entry::volatile_read_lru];
 
 	for (list_iterator<cached_piece_entry> i = piece_list->iterate(); i.get();)
@@ -607,6 +611,8 @@ void block_cache::try_evict_one_volatile()
 			--pe->num_blocks;
 			TORRENT_PIECE_ASSERT(m_read_cache_size > 0, pe);
 			--m_read_cache_size;
+			TORRENT_PIECE_ASSERT(m_volatile_size > 0, pe);
+			--m_volatile_size;
 		}
 
 		if (pe->ok_to_evict())
@@ -892,7 +898,13 @@ void block_cache::free_block(cached_piece_entry* pe, int block)
 	{
 		TORRENT_PIECE_ASSERT(m_read_cache_size > 0, pe);
 		--m_read_cache_size;
+		if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+		{
+			--m_volatile_size;
+		}
 	}
+
+
 	TORRENT_PIECE_ASSERT(pe->num_blocks > 0, pe);
 	--pe->num_blocks;
 	free_buffer(b.buf);
@@ -932,6 +944,12 @@ bool block_cache::evict_piece(cached_piece_entry* pe, tailqueue<disk_io_job>& jo
 		}
 		if (pe->num_blocks == 0) break;
 	}
+
+	if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+	{
+		m_volatile_size -= num_to_delete;
+	}
+
 	if (num_to_delete) free_multiple_buffers(to_delete, num_to_delete);
 
 	if (pe->ok_to_evict(true))
@@ -1089,6 +1107,7 @@ int block_cache::try_evict_blocks(int num, cached_piece_entry* ignore)
 
 			// go through the blocks and evict the ones that are not dirty and not
 			// referenced
+			int removed = 0;
 			for (int j = 0; j < pe->blocks_in_piece && num > 0; ++j)
 			{
 				cached_block_entry& b = pe->blocks[j];
@@ -1099,9 +1118,15 @@ int block_cache::try_evict_blocks(int num, cached_piece_entry* ignore)
 				b.buf = NULL;
 				TORRENT_PIECE_ASSERT(pe->num_blocks > 0, pe);
 				--pe->num_blocks;
-				TORRENT_PIECE_ASSERT(m_read_cache_size > 0, pe);
-				--m_read_cache_size;
+				++removed;
 				--num;
+			}
+
+			TORRENT_PIECE_ASSERT(m_read_cache_size >= removed, pe);
+			m_read_cache_size -= removed;
+			if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+			{
+				m_volatile_size -= removed;
 			}
 
 			if (pe->ok_to_evict())
@@ -1161,6 +1186,7 @@ int block_cache::try_evict_blocks(int num, cached_piece_entry* ignore)
 
 				// go through the blocks and evict the ones
 				// that are not dirty and not referenced
+				int removed = 0;
 				for (int j = 0; j < end && num > 0; ++j)
 				{
 					cached_block_entry& b = pe->blocks[j];
@@ -1171,9 +1197,15 @@ int block_cache::try_evict_blocks(int num, cached_piece_entry* ignore)
 					b.buf = NULL;
 					TORRENT_PIECE_ASSERT(pe->num_blocks > 0, pe);
 					--pe->num_blocks;
-					TORRENT_PIECE_ASSERT(m_read_cache_size > 0, pe);
-					--m_read_cache_size;
+					++removed;
 					--num;
+				}
+
+				TORRENT_PIECE_ASSERT(m_read_cache_size >= removed, pe);
+				m_read_cache_size -= removed;
+				if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+				{
+					m_volatile_size -= removed;
 				}
 
 				if (pe->ok_to_evict())
@@ -1339,6 +1371,7 @@ void block_cache::insert_blocks(cached_piece_entry* pe, int block, file::iovec_t
 			TORRENT_PIECE_ASSERT(pe->blocks[block].dirty == false, pe);
 			++pe->num_blocks;
 			++m_read_cache_size;
+			if (j->flags & disk_io_job::volatile_read) ++m_volatile_size;
 
 			if (flags & blocks_inc_refcount)
 			{
@@ -1368,6 +1401,7 @@ void block_cache::insert_blocks(cached_piece_entry* pe, int block, file::iovec_t
 					pe->blocks[block].buf = NULL;
 					--pe->num_blocks;
 					--m_read_cache_size;
+					if (j->flags & disk_io_job::volatile_read) --m_volatile_size;
 				}
 #endif
 			}
@@ -1419,6 +1453,8 @@ bool block_cache::inc_block_refcount(cached_piece_entry* pe, int block, int reas
 				pe->blocks[block].buf = NULL;
 				--pe->num_blocks;
 				--m_read_cache_size;
+				if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+					--m_volatile_size;
 				return false;
 			}
 		}
@@ -1485,6 +1521,8 @@ void block_cache::dec_block_refcount(cached_piece_entry* pe, int block, int reas
 				pe->blocks[block].buf = NULL;
 				--pe->num_blocks;
 				--m_read_cache_size;
+				if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+					--m_volatile_size;
 			}
 		}
 #endif
@@ -1550,6 +1588,7 @@ void block_cache::free_piece(cached_piece_entry* pe)
 	// and free them all in one go
 	char** to_delete = TORRENT_ALLOCA(char*, pe->blocks_in_piece);
 	int num_to_delete = 0;
+	int removed_clean = 0;
 	for (int i = 0; i < pe->blocks_in_piece; ++i)
 	{
 		if (pe->blocks[i].buf == 0) continue;
@@ -1569,9 +1608,15 @@ void block_cache::free_piece(cached_piece_entry* pe)
 		}
 		else
 		{
-			TORRENT_PIECE_ASSERT(m_read_cache_size > 0, pe);
-			--m_read_cache_size;
+			++removed_clean;
 		}
+	}
+
+	TORRENT_PIECE_ASSERT(m_read_cache_size >= removed_clean, pe);
+	m_read_cache_size -= removed_clean;
+	if (pe->cache_state == cached_piece_entry::volatile_read_lru)
+	{
+		m_volatile_size -= num_to_delete;
 	}
 	if (num_to_delete) free_multiple_buffers(to_delete, num_to_delete);
 	update_cache_state(pe);
@@ -1585,6 +1630,7 @@ int block_cache::drain_piece_bufs(cached_piece_entry& p, std::vector<char*>& buf
 
 	TORRENT_PIECE_ASSERT(p.in_use, &p);
 
+	int removed_clean = 0;
 	for (int i = 0; i < blocks_in_piece; ++i)
 	{
 		if (p.blocks[i].buf == 0) continue;
@@ -1604,10 +1650,17 @@ int block_cache::drain_piece_bufs(cached_piece_entry& p, std::vector<char*>& buf
 		}
 		else
 		{
-			TORRENT_ASSERT(m_read_cache_size > 0);
-			--m_read_cache_size;
+			++removed_clean;
 		}
 	}
+
+	TORRENT_ASSERT(m_read_cache_size >= removed_clean);
+	m_read_cache_size -= removed_clean;
+	if (p.cache_state == cached_piece_entry::volatile_read_lru)
+	{
+		m_volatile_size -= removed_clean;
+	}
+
 	update_cache_state(&p);
 	return ret;
 }
@@ -1652,6 +1705,8 @@ void block_cache::set_settings(aux::session_settings const& sett, error_code& ec
 
 	m_ghost_size = (std::max)(8, sett.get_int(settings_pack::cache_size)
 		/ (std::max)(sett.get_int(settings_pack::read_cache_line_size), 4) / 2);
+
+	m_max_volatile_blocks = sett.get_int(settings_pack::cache_size_volatile);
 	disk_buffer_pool::set_settings(sett, ec);
 }
 
