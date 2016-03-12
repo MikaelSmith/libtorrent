@@ -31,11 +31,22 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <stdlib.h>
+#include <signal.h>
 #include <boost/make_shared.hpp>
 #include "libtorrent/entry.hpp"
 #include "libtorrent/bencode.hpp"
 #include "libtorrent/session.hpp"
 #include "libtorrent/torrent_info.hpp"
+#include "libtorrent/alert_types.hpp"
+
+bool quit = false
+;
+void signal_handler(int signo)
+{
+	// make the main loop terminate
+    printf("Shutting down...\n");
+	quit = true;
+}
 
 int main(int argc, char* argv[])
 {
@@ -48,6 +59,9 @@ int main(int argc, char* argv[])
 			"to stop the client, press return.\n", stderr);
 		return 1;
 	}
+
+	signal(SIGTERM, signal_handler);
+	signal(SIGINT, signal_handler);
 
 	settings_pack sett;
 	sett.set_str(settings_pack::listen_interfaces, "0.0.0.0:6881");
@@ -66,6 +80,7 @@ int main(int argc, char* argv[])
 		fprintf(stderr, "%s\n", ec.message().c_str());
 		return 1;
 	}
+	printf("Downloading %s\n", p.ti->name().c_str());
 	s.add_torrent(p, ec);
 	if (ec)
 	{
@@ -73,9 +88,16 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	// wait for the user to end
-	char a;
-	scanf("%c\n", &a);
+	while (!quit) {
+		if (s.wait_for_alert(seconds(1))) {
+			std::auto_ptr<alert> a = s.pop_alert();
+			if (a->type() == torrent_finished_alert::alert_type) {
+				printf("Finished downloading\n");
+				quit = true;
+			}
+		}
+	}
+
 	return 0;
 }
 
