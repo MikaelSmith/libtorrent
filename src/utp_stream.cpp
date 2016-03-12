@@ -2144,7 +2144,10 @@ bool utp_socket_impl::send_pkt(int flags)
 #endif
 		TORRENT_ASSERT(h->seq_nr == m_seq_nr);
 
-		TORRENT_ASSERT(p->mtu_probe == (m_seq_nr == m_mtu_seq));
+		// 0 is a special sequence number, since it's also used as "uninitialized".
+		// we never send an mtu probe for sequence number 0
+		TORRENT_ASSERT(p->mtu_probe == (m_seq_nr == m_mtu_seq)
+			|| m_seq_nr == 0);
 
 		// release the buffer, we're saving it in the circular
 		// buffer of outgoing packets
