@@ -35,6 +35,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/utp_socket_manager.hpp"
 #include "libtorrent/instantiate_connection.hpp"
 #include "libtorrent/socket_io.hpp"
+#include "libtorrent/socket.hpp" // for TORRENT_HAS_DONT_FRAGMENT
 #include "libtorrent/broadcast_socket.hpp" // for is_teredo
 #include "libtorrent/random.hpp"
 #include "libtorrent/performance_counters.hpp"
@@ -163,7 +164,7 @@ namespace libtorrent
 		if (flags & utp_socket_manager::dont_fragment)
 		{
 			m_sock.set_option(libtorrent::dont_fragment(true), tmp);
-			TORRENT_ASSERT_VAL(!tmp, tmp.mesasge());
+			TORRENT_ASSERT_VAL(!tmp, tmp.message());
 		}
 #endif
 		m_sock.send(ep, p, len, ec);
@@ -171,7 +172,7 @@ namespace libtorrent
 		if (flags & utp_socket_manager::dont_fragment)
 		{
 			m_sock.set_option(libtorrent::dont_fragment(false), tmp);
-			TORRENT_ASSERT_VAL(!tmp, tmp.mesasge());
+			TORRENT_ASSERT_VAL(!tmp, tmp.message());
 		}
 #endif
 	}
